@@ -1,0 +1,6 @@
+# Игнорировать все файлы
+*
+
+# Кроме самого скрипта и gitignore
+!arucaupd.py
+!.gitignore
