@@ -59,6 +59,14 @@ waiting_at_target: bool = False
 target_arrival_time: float = 0.0
 hunt_mode_enabled: bool = True
 
+left_line_sensor: int = 0
+right_line_sensor: int = 0
+avoid_state: str = "NORMAL"
+avoid_end_time: float = 0.0
+avoid_turn_dir: int = 1
+LINE_THRESHOLD: int = 600
+
+
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
@@ -339,12 +347,13 @@ def web_test_servo():
 
 @app.route('/stop', methods=['POST'])
 def web_stop():
-    global autopilot_enabled, target_pixel, target_marker_id, servo_active, waiting_at_target
+    global autopilot_enabled, target_pixel, target_marker_id, servo_active, waiting_at_target, avoid_state
     autopilot_enabled = False
     target_pixel = None
     target_marker_id = None
     servo_active = False
     waiting_at_target = False
+    avoid_state = "NORMAL"
     print("[WEB] Экстренный останов.")
     return jsonify({"status": "ok"})
 
@@ -383,11 +392,29 @@ def send_servo(connection: socket.socket, angle: int) -> None:
         time.sleep(0.015)
 
 
+telemetry_buffer = ""
+
 def drain_telemetry(connection: socket.socket) -> None:
+    global left_line_sensor, right_line_sensor, telemetry_buffer
     connection.setblocking(False)
     try:
-        while connection.recv(2048):
-            pass
+        data = connection.recv(4096).decode('ascii', errors='ignore')
+        if data:
+            telemetry_buffer += data
+            if "\n" in telemetry_buffer:
+                lines = telemetry_buffer.split("\n")
+                telemetry_buffer = lines[-1]
+                for line in reversed(lines[:-1]):
+                    line = line.strip()
+                    if line.startswith("TEL"):
+                        parts = line.split()
+                        if len(parts) >= 10:
+                            try:
+                                left_line_sensor = int(parts[8])
+                                right_line_sensor = int(parts[9])
+                            except ValueError:
+                                pass
+                        break
     except (BlockingIOError, socket.timeout, OSError):
         pass
     finally:
@@ -511,6 +538,7 @@ def main() -> None:
     global servo_active, servo_step, servo_step_time, servo_pause_current
     global frame_width, frame_height, state_str, current_command, latest_jpeg_frame
     global autopilot_enabled, waiting_at_target, target_arrival_time, hunt_mode_enabled
+    global avoid_state, avoid_end_time, avoid_turn_dir, left_line_sensor, right_line_sensor
 
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(
@@ -602,7 +630,7 @@ def main() -> None:
             detected_enemy_pixel = None
             is_attacking = False
 
-            if hunt_mode_enabled:
+            if hunt_mode_enabled and avoid_state == "NORMAL":
                 for e_id in ENEMY_MARKER_IDS:
                     if e_id in markers:
                         detected_enemy_id = e_id
@@ -610,19 +638,46 @@ def main() -> None:
                         is_attacking = True
                         break
 
-            if is_attacking:
+            if is_attacking and avoid_state == "NORMAL":
                 target_pixel = detected_enemy_pixel
                 target_marker_id = detected_enemy_id
                 waiting_at_target = False
             else:
-                if target_marker_id in ENEMY_MARKER_IDS:
+                if target_marker_id in ENEMY_MARKER_IDS and avoid_state == "NORMAL":
                     target_pixel = None
                     target_marker_id = None
 
             command = "STOP"
             state = "SEARCHING TARGETS"
 
-            if waiting_at_target:
+            if avoid_state == "NORMAL":
+                if left_line_sensor > LINE_THRESHOLD or right_line_sensor > LINE_THRESHOLD:
+                    avoid_state = "BACKING_UP"
+                    avoid_end_time = now_time + 0.65
+                    avoid_turn_dir = -1 if left_line_sensor > LINE_THRESHOLD else 1
+                    waiting_at_target = False
+                    print(f"[LINE AVOID] Линия! L={left_line_sensor}, R={right_line_sensor}. Откат назад...")
+
+            if avoid_state == "BACKING_UP":
+                if now_time < avoid_end_time:
+                    command = "VEL -200 0"
+                    state = "LINE AVOID: BACKUP"
+                else:
+                    avoid_state = "TURNING_AWAY"
+                    avoid_end_time = now_time + 0.5
+
+            if avoid_state == "TURNING_AWAY":
+                if now_time < avoid_end_time:
+                    angular = 3500 if avoid_turn_dir == 1 else -3500
+                    command = f"VEL 0 {angular}"
+                    state = "LINE AVOID: TURN"
+                else:
+                    avoid_state = "NORMAL"
+                    command = "STOP"
+                    state = "SEARCHING TARGETS"
+                    print("[LINE AVOID] Возврат к нормальному движению.")
+
+            if waiting_at_target and avoid_state == "NORMAL":
                 if now_time - target_arrival_time >= 0.8:
                     target_pixel = None
                     target_marker_id = None
@@ -657,7 +712,7 @@ def main() -> None:
                     cv2.putText(frame, status_str, (mc[0] - 30, mc[1] - 15),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            if autopilot_enabled and robot_center is not None and target_pixel is None and not waiting_at_target:
+            if autopilot_enabled and robot_center is not None and target_pixel is None and not waiting_at_target and avoid_state == "NORMAL":
                 new_target, new_target_id = select_next_target(robot_center, markers)
                 if new_target is not None:
                     target_pixel = new_target
@@ -665,10 +720,10 @@ def main() -> None:
                     servo_active = True
                     print(f"[INFO] Выбран новый маркер-цель #{target_marker_id}: {target_pixel}")
 
-            if target_marker_id is not None and target_marker_id in markers and not waiting_at_target:
+            if target_marker_id is not None and target_marker_id in markers and not waiting_at_target and avoid_state == "NORMAL":
                 target_pixel = get_marker_center(markers[target_marker_id])
 
-            if target_pixel is not None and robot_center is not None:
+            if target_pixel is not None and robot_center is not None and avoid_state == "NORMAL":
                 target_pos = np.array(target_pixel, dtype=np.float32)
                 dist_to_target = float(np.linalg.norm(target_pos - robot_center))
                 if dist_to_target <= TARGET_TOLERANCE_PX:
@@ -699,7 +754,7 @@ def main() -> None:
                     elif servo_step == 4:
                         servo_step = 0
 
-            if autopilot_enabled and target_pixel is not None and not waiting_at_target:
+            if autopilot_enabled and target_pixel is not None and not waiting_at_target and avoid_state == "NORMAL":
                 cv2.circle(frame, target_pixel, TARGET_TOLERANCE_PX, (0, 170, 255), 2)
 
                 if not robot_is_valid:
@@ -830,6 +885,7 @@ def main() -> None:
                 servo_active = False
                 autopilot_enabled = False
                 waiting_at_target = False
+                avoid_state = "NORMAL"
                 send(connection, "STOP")
                 print("[INFO] Экстренный останов.")
 
