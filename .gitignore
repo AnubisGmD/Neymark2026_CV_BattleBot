@@ -1,6 +1,7 @@
 # Игнорировать все файлы
 *
 
-# Кроме самого скрипта и gitignore
+# Разрешенные файлы
 !arucaupd.py
 !.gitignore
+!README.md
