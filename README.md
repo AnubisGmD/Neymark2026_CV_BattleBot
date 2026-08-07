@@ -11,7 +11,7 @@
 ## 📸 Демонстрация работы
 
 ### Видеозапись тестов автопилота:
-<video src="battlebot_demo.mp4" width="100%" controls></video>
+![BattleBot Demo](battlebot_demo.mp4)
 
 *Скриншот работы мобильного пульта управления во время прохождения трассы:*
 ![BattleBot Demo Cover](battlebot_demo_cover.png)
