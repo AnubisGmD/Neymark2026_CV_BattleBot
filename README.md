@@ -14,7 +14,7 @@
 ![BattleBot Demo](battlebot_demo.mp4)
 
 *Скриншот работы мобильного пульта управления во время прохождения трассы:*
-![BattleBot Demo Cover](battlebot_demo_cover.png)
+![BattleBot Web Control](battlebot_web_control.png)
 
 ---
 
